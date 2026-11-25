@@ -394,6 +394,85 @@ fn max_and_min_order_negative_zero_below_positive_zero() {
     }
 }
 
+/// Denormal operands of the f32 maximums, minimums and medians read as
+/// zeros of their sign (the console's float mode), decided on the bits so
+/// that every host agrees (WARP flushed some and not others). The inputs
+/// are rows of a cross-device fuzz on an RX 9070, a gfx1036 and WARP
+/// (issue 82 of Belobug/VIctory-Belobug-AMD); the expected values are the
+/// AMD results, which WARP did not give.
+#[test]
+fn min_max_and_med3_read_denormals_as_zeros() {
+    let cases: &[(&str, u16, [u32; 4], u32)] = &[
+        (
+            "v_min_f32",
+            0x10F,
+            [0x8000_0001, 0x0000_0003, 0, 0],
+            0x8000_0000,
+        ),
+        ("v_min_f32", 0x10F, [0x0000_0010, 0x7FC0_0000, 0, 0], 0),
+        ("v_max_f32", 0x110, [0x0000_0010, 0x7FFF_FFFF, 0, 0], 0),
+        (
+            "v_min3_f32",
+            0x151,
+            [0x03F9_8400, 0x807F_FFFF, 0x0001_0000, 0],
+            0x8000_0000,
+        ),
+        (
+            "v_max3_f32",
+            0x154,
+            [0x0000_001F, 0x8400_83FF, 0x8000_0001, 0],
+            0,
+        ),
+        (
+            "v_med3_f32",
+            0x157,
+            [0x0000_0001, 0x4E80_0000, 0x807F_FFFF, 0],
+            0,
+        ),
+    ];
+    for &(name, op, input, want) in cases {
+        let shader = build_valu_cs(&vop3(op, 0, vgpr(1), vgpr(2), vgpr(3)));
+        run_cases(&shader, &[input], |backend, _, inp, got| {
+            assert_eq!(
+                got, want,
+                "{backend}: {name} {inp:x?}: {got:#010x}, want {want:#010x}"
+            );
+        });
+    }
+}
+
+/// f16 results round to nearest even (the console's default MODE) on every
+/// host: DXIL's `legacyF32ToF16` rounds toward zero on AMD and WARP, and
+/// the AMD compiler turned a narrowed f32 add into a native f16 add that
+/// does too (`-65504 + -2^-24` gave 0xfbfe in the fuzz of issue 82).
+#[test]
+fn f16_add_rounds_to_nearest_even() {
+    // v_add_f16 v0, v1, v2 (VOP3 opcode 0x132); the result is v0's low half.
+    let shader = build_valu_cs(&vop3(0x132, 0, vgpr(1), vgpr(2), 0));
+    let cases: &[([u32; 4], u32)] = &[
+        // -65504 + -2^-24: -65504 (toward zero gives 0xfbfe).
+        ([0xFBFF, 0x8001, 0, 0], 0xFBFF),
+        // (1 + 2^-10) + 2^-11, a tie: to the even 1 + 2^-9.
+        ([0x3C01, 0x1000, 0, 0], 0x3C02),
+        // 65504 + 32 overflows to infinity (toward zero gives 65504).
+        ([0x7BFF, 0x5000, 0, 0], 0x7C00),
+        // 1 + 2^-24: 1.
+        ([0x3C00, 0x0001, 0, 0], 0x3C00),
+    ];
+    let inputs: Vec<[u32; 4]> = cases.iter().map(|c| c.0).collect();
+    run_cases(&shader, &inputs, |backend, i, inp, got| {
+        let want = cases[i].1;
+        assert_eq!(
+            got & 0xFFFF,
+            want,
+            "{backend}: v_add_f16({:#06x}, {:#06x}) = {:#06x}, want {want:#06x}",
+            inp[0],
+            inp[1],
+            got & 0xFFFF,
+        );
+    });
+}
+
 #[test]
 fn v_med3_f16_matches_rdna2_with_nan() {
     // v_med3_f16 v0, v1, v2, v3 (VOP3 opcode 0x357)
